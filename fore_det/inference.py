@@ -108,17 +108,37 @@ def inference_detector(model, img):
     """
     cfg = model.cfg
     device = next(model.parameters()).device  # model device
+    if isinstance(img, np.ndarray):
+        # directly add img
+        data = dict(img=img)
+        cfg = cfg.copy()
+        # set loading pipeline type
+        cfg.data.test.pipeline[0].type = 'LoadImageFromWebcam'
+    else:
+        # add information into dict
+        data = dict(img_info=dict(filename=img), img_prefix=None)
     # build the data pipeline
-    test_pipeline = [LoadImage()] + cfg.data.test.pipeline[1:]
-    test_pipeline = Compose(test_pipeline)
-    # prepare data
-    data = dict(img=img)
+    test_pipeline = Compose(cfg.data.test.pipeline)
     data = test_pipeline(data)
-    data = scatter(collate([data], samples_per_gpu=1), [device])[0]
+    data = collate([data], samples_per_gpu=1)
+    if next(model.parameters()).is_cuda:
+        # scatter to specified GPU
+        data = scatter(data, [device])[0]
+    else:
+        # Use torchvision ops for CPU mode instead
+        for m in model.modules():
+            if isinstance(m, (RoIPool, RoIAlign)):
+                if not m.aligned:
+                    # aligned=False is not implemented on CPU
+                    # set use_torchvision on-the-fly
+                    m.use_torchvision = True
+        warnings.warn('We set use_torchvision=True in CPU mode.')
+        # just get the actual data from DataContainer
+        data['img_metas'] = data['img_metas'][0].data
+
     # forward the model
     with torch.no_grad():
-        result = model(return_loss=False, rescale=True, **data)
-
+        result = model(return_loss=False, rescale=True, **data)[0]
     return result
 
 
